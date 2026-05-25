@@ -19,6 +19,21 @@ pub trait ProviderAdapter: Send + Sync {
     fn token_count(&self, text: &str) -> usize;
 }
 
+#[async_trait]
+impl<T: ProviderAdapter + ?Sized> ProviderAdapter for Arc<T> {
+    async fn complete(&self, req: ChatCompletionRequest) -> Result<ChatCompletionResponse, ProviderError> {
+        self.as_ref().complete(req).await
+    }
+
+    async fn stream(&self, req: ChatCompletionRequest) -> Result<ByteStream, ProviderError> {
+        self.as_ref().stream(req).await
+    }
+
+    fn token_count(&self, text: &str) -> usize {
+        self.as_ref().token_count(text)
+    }
+}
+
 pub struct RetryClient<T: ProviderAdapter> {
     inner: T,
     max_retries: u32,

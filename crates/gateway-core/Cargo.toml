@@ -32,6 +32,9 @@ async-trait.workspace = true
 futures.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
+sha2.workspace = true
+hex.workspace = true
+sqlx.workspace = true
 
 adapters = { path = "../adapters" }
 middleware = { path = "../middleware" }
