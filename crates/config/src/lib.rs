@@ -14,6 +14,8 @@ pub struct GatewayConfig {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    pub tls_cert_path: Option<String>,
+    pub tls_key_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
