@@ -56,6 +56,7 @@ impl ChatCompletionRequest {
                 role: m.role.clone(),
                 content: m.content.clone(),
             }).collect(),
+            stream: None,
         }
     }
 
@@ -67,6 +68,7 @@ impl ChatCompletionRequest {
                 anthropic::AnthropicMessage { role: m.role.clone(), content }
             }).collect(),
             max_tokens: self.max_tokens.unwrap_or(1024),
+            stream: None,
         }
     }
 }

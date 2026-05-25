@@ -1,7 +1,11 @@
 use async_trait::async_trait;
+use bytes::Bytes;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncBufReadExt;
+use tokio_util::io::StreamReader;
 
-use crate::client::ProviderClient;
+use crate::client::{ByteStream, ProviderAdapter};
 use crate::error::ProviderError;
 use crate::request::{ChatCompletionRequest, ChatCompletionResponse, Choice, Message, Usage};
 
@@ -10,6 +14,7 @@ pub struct AnthropicRequest {
     pub model: String,
     pub messages: Vec<AnthropicMessage>,
     pub max_tokens: u32,
+    pub stream: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -55,28 +60,31 @@ impl AnthropicClient {
             base_url: base_url.into(),
         }
     }
-}
 
-#[async_trait]
-impl ProviderClient for AnthropicClient {
-    async fn chat_completion(&self, req: ChatCompletionRequest) -> Result<ChatCompletionResponse, ProviderError> {
+    fn build_request(&self, req: &ChatCompletionRequest, stream: bool) -> reqwest::RequestBuilder {
         let anthropic_req = AnthropicRequest {
             model: req.model.clone(),
-            messages: req.messages.into_iter().map(|m| AnthropicMessage {
-                role: m.role,
+            messages: req.messages.iter().map(|m| AnthropicMessage {
+                role: m.role.clone(),
                 content: serde_json::to_string(&m.content).unwrap_or_default(),
             }).collect(),
             max_tokens: req.max_tokens.unwrap_or(1024),
+            stream: if stream { Some(true) } else { None },
         };
 
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
-        let resp = self.client
+        self.client
             .post(&url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .json(&anthropic_req)
-            .send()
-            .await?;
+    }
+}
+
+#[async_trait]
+impl ProviderAdapter for AnthropicClient {
+    async fn complete(&self, req: ChatCompletionRequest) -> Result<ChatCompletionResponse, ProviderError> {
+        let resp = self.build_request(&req, false).send().await?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
@@ -118,5 +126,45 @@ impl ProviderClient for AnthropicClient {
                 total_tokens: u.input_tokens + u.output_tokens,
             }),
         })
+    }
+
+    async fn stream(&self, req: ChatCompletionRequest) -> Result<ByteStream, ProviderError> {
+        let resp = self.build_request(&req, true).send().await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(if status == 429 {
+                ProviderError::RateLimited
+            } else {
+                ProviderError::Api { status, body }
+            });
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, ProviderError>>(64);
+
+        tokio::spawn(async move {
+            let byte_stream = resp.bytes_stream().map(|r| {
+                r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+            });
+            let reader = StreamReader::new(byte_stream);
+            let mut lines = tokio::io::BufReader::new(reader).lines();
+
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(data) = line.strip_prefix("data: ") {
+                    let trimmed = data.trim();
+                    let _ = tx.send(Ok(Bytes::from(trimmed.to_string()))).await;
+                }
+                if line.is_empty() {
+                    let _ = tx.send(Ok(Bytes::from("\n"))).await;
+                }
+            }
+        });
+
+        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+    }
+
+    fn token_count(&self, text: &str) -> usize {
+        (text.len() / 4).max(text.split_whitespace().count())
     }
 }
