@@ -20,4 +20,13 @@ pub enum ProviderError {
 
     #[error("All providers in fallback chain failed")]
     AllProvidersFailed,
+
+    #[error("Cache error: {0}")]
+    CacheError(String),
+
+    #[error("Guardrails violation: {0}")]
+    GuardrailsViolation(String),
+
+    #[error("Metering error: {0}")]
+    MeteringError(String),
 }

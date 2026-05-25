@@ -20,8 +20,17 @@ async fn main() -> anyhow::Result<()> {
     let openai_url = std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com".into());
     let anthropic_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_else(|_| "sk-ant-placeholder".into());
     let anthropic_url = std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".into());
+    let redis_url = std::env::var("REDIS_URL").ok();
+    let database_url = std::env::var("DATABASE_URL").ok();
 
-    let state = routes::AppState::with_defaults(openai_key, openai_url, anthropic_key, anthropic_url);
+    let state = routes::AppState::with_defaults(
+        openai_key,
+        openai_url,
+        anthropic_key,
+        anthropic_url,
+        redis_url,
+        database_url,
+    );
 
     let trace_layer = TraceLayer::new_for_http()
         .make_span_with(DefaultMakeSpan::new().level(Level::INFO).include_headers(false))
