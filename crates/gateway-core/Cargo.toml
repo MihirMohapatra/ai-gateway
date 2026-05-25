@@ -20,6 +20,14 @@ opentelemetry_sdk.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+bytes.workspace = true
+http.workspace = true
+http-body-util.workspace = true
 
 adapters = { path = "../adapters" }
 middleware = { path = "../middleware" }
