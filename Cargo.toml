@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gateway-core",
+    "crates/adapters",
+    "crates/middleware",
+    "crates/cache",
+    "crates/config",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+redis = { version = "0.25", features = ["tokio-comp"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-opentelemetry = "0.24"
+opentelemetry = "0.23"
+opentelemetry_sdk = "0.23"
+jsonwebtoken = "9"
+governor = "0.6"
+toml = "0.8"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "1"
+anyhow = "1"
+dashmap = "6"
+chrono = { version = "0.4", features = ["serde"] }
