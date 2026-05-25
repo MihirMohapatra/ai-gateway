@@ -28,6 +28,7 @@ hyper-util.workspace = true
 bytes.workspace = true
 http.workspace = true
 http-body-util.workspace = true
+async-trait.workspace = true
 
 adapters = { path = "../adapters" }
 middleware = { path = "../middleware" }

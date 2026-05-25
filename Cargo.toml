@@ -44,3 +44,4 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 bytes = "1"
 http = "1"
 http-body-util = "0.1"
+async-trait = "0.1"
