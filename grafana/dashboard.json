@@ -1,0 +1,79 @@
+{
+  "title": "AI Gateway — Observability",
+  "uid": "ai-gateway",
+  "tags": ["ai-gateway", "llm"],
+  "timezone": "browser",
+  "panels": [
+    {
+      "title": "Request Rate",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "targets": [{
+        "expr": "rate(ai_gateway_requests_total[1m])",
+        "legendFormat": "{{provider}} {{status}}"
+      }],
+      "description": "Requests per second by provider and status"
+    },
+    {
+      "title": "Latency p50 / p95 / p99",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "targets": [
+        {"expr": "histogram_quantile(0.50, rate(ai_gateway_request_duration_seconds_bucket[5m]))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, rate(ai_gateway_request_duration_seconds_bucket[5m]))", "legendFormat": "p95"},
+        {"expr": "histogram_quantile(0.99, rate(ai_gateway_request_duration_seconds_bucket[5m]))", "legendFormat": "p99"}
+      ],
+      "description": "Request latency percentiles by provider"
+    },
+    {
+      "title": "Error Rate",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "targets": [{
+        "expr": "rate(ai_gateway_errors_total[1m]) / rate(ai_gateway_requests_total[1m])",
+        "legendFormat": "error ratio"
+      }],
+      "description": "Ratio of error responses to total requests"
+    },
+    {
+      "title": "Token Usage Rate",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "targets": [{
+        "expr": "rate(ai_gateway_tokens_total[1m])",
+        "legendFormat": "{{type}}"
+      }],
+      "description": "Token consumption per second (prompt vs completion)"
+    },
+    {
+      "title": "Cache Hit Ratio",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "targets": [{
+        "expr": "rate(ai_gateway_cache_operations_total{type=\"hit\"}[5m]) / (rate(ai_gateway_cache_operations_total{type=\"hit\"}[5m]) + rate(ai_gateway_cache_operations_total{type=\"miss\"}[5m]))",
+        "legendFormat": "hit ratio"
+      }],
+      "description": "Fraction of requests served from cache"
+    },
+    {
+      "title": "Active Requests",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "targets": [{
+        "expr": "ai_gateway_requests_in_flight",
+        "legendFormat": "in-flight"
+      }],
+      "description": "Currently executing requests"
+    },
+    {
+      "title": "Estimated Cost / hour",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "targets": [
+        {"expr": "rate(ai_gateway_tokens_total{type=\"prompt\"}[1m]) * 0.00001 * 3600", "legendFormat": "prompt cost"},
+        {"expr": "rate(ai_gateway_tokens_total{type=\"completion\"}[1m]) * 0.00003 * 3600", "legendFormat": "completion cost"}
+      ],
+      "description": "Estimated USD per hour (rates: $10/m prompt, $30/m completion)"
+    }
+  ]
+}

@@ -61,6 +61,7 @@ impl OpenAIClient {
 
 #[async_trait]
 impl ProviderAdapter for OpenAIClient {
+    #[tracing::instrument(skip(self, req), fields(provider = "openai", model = %req.model))]
     async fn complete(&self, req: ChatCompletionRequest) -> Result<ChatCompletionResponse, ProviderError> {
         let resp = self.build_request(&req, false).send().await?;
 

@@ -83,6 +83,7 @@ impl AnthropicClient {
 
 #[async_trait]
 impl ProviderAdapter for AnthropicClient {
+    #[tracing::instrument(skip(self, req), fields(provider = "anthropic", model = %req.model))]
     async fn complete(&self, req: ChatCompletionRequest) -> Result<ChatCompletionResponse, ProviderError> {
         let resp = self.build_request(&req, false).send().await?;
 
