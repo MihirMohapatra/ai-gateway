@@ -53,3 +53,4 @@ hex = "0.4"
 regex = "1"
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono"] }
 prometheus = { version = "0.13", features = ["process"] }
+notify = "6"

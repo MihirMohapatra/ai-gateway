@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::convert::Infallible;
 use std::time::Instant;
 
@@ -6,6 +6,7 @@ use axum::extract::State;
 use axum::response::sse::{Event, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use config::GatewayConfig;
 use futures::stream::Stream;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::instrument;
@@ -28,76 +29,94 @@ use crate::metrics::Metrics;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub router: Arc<dyn ProviderRouter>,
+    pub router: Arc<RwLock<Arc<dyn ProviderRouter>>>,
     pub metrics: Metrics,
 }
 
-impl AppState {
-    pub fn with_defaults(
-        openai_key: impl Into<String>,
-        openai_url: impl Into<String>,
-        anthropic_key: impl Into<String>,
-        anthropic_url: impl Into<String>,
-        redis_url: Option<String>,
-        _database_url: Option<String>,
-    ) -> Arc<Self> {
-        let openai_key = openai_key.into();
-        let openai_url = openai_url.into();
-        let anthropic_key = anthropic_key.into();
-        let anthropic_url = anthropic_url.into();
-        let metrics = Metrics::new();
-
-        let cache_backend: Arc<dyn CacheBackend> = if let Some(url) = redis_url {
-            match RedisCache::new(&url) {
-                Ok(rc) => Arc::new(rc),
-                Err(e) => {
-                    tracing::warn!("redis connection failed, falling back to local cache: {e}");
-                    Arc::new(LocalCache::new(std::time::Duration::from_secs(3600)))
-                }
+fn build_router(config: &GatewayConfig) -> Arc<dyn ProviderRouter> {
+    let cache_backend: Arc<dyn CacheBackend> = if let Some(ref url) = config.cache.redis_url {
+        match RedisCache::new(url) {
+            Ok(rc) => Arc::new(rc),
+            Err(e) => {
+                tracing::warn!("redis connection failed, falling back to local cache: {e}");
+                Arc::new(LocalCache::new(std::time::Duration::from_secs(
+                    config.cache.ttl_secs.unwrap_or(3600),
+                )))
             }
-        } else {
-            Arc::new(LocalCache::new(std::time::Duration::from_secs(3600)))
-        };
+        }
+    } else {
+        Arc::new(LocalCache::new(std::time::Duration::from_secs(
+            config.cache.ttl_secs.unwrap_or(3600),
+        )))
+    };
 
-        let meter_backend: Arc<dyn MeterBackend> = Arc::new(ConsoleMeter);
+    let meter_backend: Arc<dyn MeterBackend> = Arc::new(ConsoleMeter);
 
-        let make_pipeline = |client: Arc<dyn ProviderAdapter>, api_key: &str| -> Arc<dyn ProviderAdapter> {
-            let client: Arc<dyn ProviderAdapter> = Arc::new(
-                CircuitBreakerAdapter::new(client, 5, std::time::Duration::from_secs(30), 3),
-            );
-            let client: Arc<dyn ProviderAdapter> = Arc::new(
-                RetryClient::new(client, 3, std::time::Duration::from_millis(500), std::time::Duration::from_secs(5)),
-            );
-            let client: Arc<dyn ProviderAdapter> = Arc::new(
-                MeteringClient::new(client, Arc::clone(&meter_backend), api_key),
-            );
-            let client: Arc<dyn ProviderAdapter> = Arc::new(
-                CachingClient::new(client, Arc::clone(&cache_backend), 3600),
-            );
-            let client: Arc<dyn ProviderAdapter> = Arc::new(
-                GuardrailsClient::new(client, GuardrailsConfig::default()),
-            );
-            client
-        };
-
-        let openai = make_pipeline(
-            Arc::new(OpenAIClient::new(&openai_key, &openai_url)),
-            "default",
+    let make_pipeline = |client: Arc<dyn ProviderAdapter>, api_key: &str| -> Arc<dyn ProviderAdapter> {
+        let client: Arc<dyn ProviderAdapter> = Arc::new(
+            CircuitBreakerAdapter::new(client, 5, std::time::Duration::from_secs(30), 3),
         );
-        let anthropic = make_pipeline(
-            Arc::new(AnthropicClient::new(&anthropic_key, &anthropic_url)),
-            "default",
+        let client: Arc<dyn ProviderAdapter> = Arc::new(
+            RetryClient::new(client, 3, std::time::Duration::from_millis(500), std::time::Duration::from_secs(5)),
+        );
+        let client: Arc<dyn ProviderAdapter> = Arc::new(
+            MeteringClient::new(client, Arc::clone(&meter_backend), api_key),
+        );
+        let client: Arc<dyn ProviderAdapter> = Arc::new(
+            CachingClient::new(client, Arc::clone(&cache_backend), config.cache.ttl_secs.unwrap_or(3600) as usize),
         );
 
-        let router = ProviderMap::new()
-            .with_provider("openai", openai)
-            .with_provider("anthropic", anthropic)
-            .with_default("openai");
+        let guardrails_cfg = config.guardrails.as_ref().map(|g| GuardrailsConfig {
+            max_input_chars: g.max_input_chars.unwrap_or(100_000),
+            max_output_chars: g.max_output_chars.unwrap_or(100_000),
+            blocked_patterns: g.blocked_patterns.clone().unwrap_or_default(),
+            required_patterns: g.required_patterns.clone().unwrap_or_default(),
+        }).unwrap_or_default();
 
+        let client: Arc<dyn ProviderAdapter> = Arc::new(
+            GuardrailsClient::new(client, guardrails_cfg),
+        );
+        client
+    };
+
+    let mut router = ProviderMap::new();
+
+    if let Some(ref openai_cfg) = config.providers.openai {
+        let client = make_pipeline(
+            Arc::new(OpenAIClient::new(&openai_cfg.api_key, &openai_cfg.base_url)),
+            "default",
+        );
+        router = router.with_provider("openai", client);
+    }
+
+    if let Some(ref anthropic_cfg) = config.providers.anthropic {
+        let client = make_pipeline(
+            Arc::new(AnthropicClient::new(&anthropic_cfg.api_key, &anthropic_cfg.base_url)),
+            "default",
+        );
+        router = router.with_provider("anthropic", client);
+    }
+
+    let default = config.routing.as_ref()
+        .and_then(|r| r.default_provider.as_deref())
+        .unwrap_or("openai");
+    router = router.with_default(default);
+
+    Arc::new(router)
+}
+
+impl AppState {
+    pub fn with_defaults(config: &GatewayConfig) -> Arc<Self> {
+        let router = build_router(config);
         Arc::new(Self {
-            router: Arc::new(router),
-            metrics,
+            router: Arc::new(RwLock::new(router)),
+            metrics: Metrics::new(),
         })
+    }
+
+    pub fn reload_config(&self, config: GatewayConfig) {
+        let new_router = build_router(&config);
+        *self.router.write().unwrap() = new_router;
     }
 }
 
@@ -212,7 +231,8 @@ async fn handle_chat(
     state.metrics.requests_in_flight.inc();
     let start = Instant::now();
 
-    let result = state.router.complete(&req, Some(provider_name)).await;
+    let router = state.router.read().unwrap().clone();
+    let result = router.complete(&req, Some(provider_name)).await;
     let latency = start.elapsed().as_secs_f64();
 
     match result {
@@ -256,7 +276,9 @@ pub async fn handle_chat_stream(
     state.metrics.requests_in_flight.inc();
     let start = Instant::now();
 
-    let byte_stream = state.router.stream(&req, Some(provider_name)).await.map_err(|e| {
+    let router = state.router.read().unwrap().clone();
+
+    let byte_stream = router.stream(&req, Some(provider_name)).await.map_err(|e| {
         state.metrics.observe_request(provider_name, model, "error", start.elapsed().as_secs_f64());
         state.metrics.record_error(provider_name, &format!("{:?}", e));
         state.metrics.requests_in_flight.dec();
