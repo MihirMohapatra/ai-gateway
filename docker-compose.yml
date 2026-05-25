@@ -1,0 +1,50 @@
+version: "3.9"
+
+services:
+  gateway:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      GATEWAY__PROVIDERS__OPENAI__API_KEY: ${OPENAI_API_KEY:-sk-placeholder}
+      GATEWAY__PROVIDERS__ANTHROPIC__API_KEY: ${ANTHROPIC_API_KEY:-sk-ant-placeholder}
+      GATEWAY__AUTH__JWT_SECRET: ${JWT_SECRET:-dev-secret}
+      GATEWAY__CACHE__REDIS_URL: redis://redis:6379
+      GATEWAY__METERING__DATABASE_URL: postgres://gateway:gateway@postgres:5432/ai_gateway
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - redis_data:/data
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ai_gateway
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: gateway
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "gateway", "-d", "ai_gateway"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  redis_data:
+  postgres_data:

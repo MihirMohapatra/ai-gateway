@@ -1,7 +1,9 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{Router, routing::get};
+use axum::Router;
+use config::loader::{load, watch};
 use middleware::auth::AuthLayer;
 use middleware::rate_limit::RateLimitLayer;
 use tower::ServiceBuilder;
@@ -12,26 +14,35 @@ mod metrics;
 mod routes;
 mod tls;
 
+fn config_path() -> String {
+    std::env::var("GATEWAY_CONFIG").unwrap_or_else(|_| "gateway.toml".into())
+}
+
+async fn hot_reload_loop(state: Arc<routes::AppState>, watcher: config::loader::ConfigWatcher) {
+    let mut rx = watcher.rx;
+    while rx.changed().await.is_ok() {
+        let config = rx.borrow().clone();
+        tracing::info!("config changed, reloading routing rules");
+        state.reload_config(config);
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = middleware::telemetry::init_telemetry();
 
-    let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret".into());
-    let openai_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| "sk-placeholder".into());
-    let openai_url = std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com".into());
-    let anthropic_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_else(|_| "sk-ant-placeholder".into());
-    let anthropic_url = std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".into());
-    let redis_url = std::env::var("REDIS_URL").ok();
-    let database_url = std::env::var("DATABASE_URL").ok();
+    let config_path = config_path();
+    let config = load(&config_path)?;
 
-    let state = routes::AppState::with_defaults(
-        openai_key,
-        openai_url,
-        anthropic_key,
-        anthropic_url,
-        redis_url,
-        database_url,
-    );
+    let state = routes::AppState::with_defaults(&config);
+
+    if let Ok(watcher) = watch(&config_path) {
+        let hb_state = Arc::clone(&state);
+        tokio::spawn(async move { hot_reload_loop(hb_state, watcher).await });
+        tracing::info!("watching {config_path} for changes");
+    } else {
+        tracing::warn!("file watching not available, hot reload disabled");
+    }
 
     let trace_layer = TraceLayer::new_for_http()
         .make_span_with(
@@ -45,8 +56,11 @@ async fn main() -> anyhow::Result<()> {
                 .latency_unit(tower_http::LatencyUnit::Micros),
         );
 
+    let jwt_secret = config.auth.jwt_secret.clone();
+    let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port).parse().unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], 3000)));
+
     let app = Router::new()
-        .route("/health", get(|| async { "OK" }))
+        .route("/health", axum::routing::get(|| async { "OK" }))
         .merge(routes::router(state))
         .layer(
             ServiceBuilder::new()
@@ -55,9 +69,10 @@ async fn main() -> anyhow::Result<()> {
                 .layer(AuthLayer::jwt(jwt_secret)),
         );
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-
-    match (option_env!("TLS_CERT"), option_env!("TLS_KEY")) {
+    match (
+        config.server.tls_cert_path.as_ref(),
+        config.server.tls_key_path.as_ref(),
+    ) {
         (Some(cert), Some(key)) => {
             let acceptor = tls::load_tls_acceptor(cert, key)?;
             tls::serve_tls(app, addr, acceptor).await?;

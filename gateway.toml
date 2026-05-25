@@ -1,0 +1,31 @@
+[server]
+host = "0.0.0.0"
+port = 3000
+
+[auth]
+jwt_secret = "change-me-in-production"
+enabled = true
+
+[providers.openai]
+api_key = "sk-placeholder"
+base_url = "https://api.openai.com"
+
+[providers.anthropic]
+api_key = "sk-ant-placeholder"
+base_url = "https://api.anthropic.com"
+
+[cache]
+redis_url = "redis://localhost:6379"
+ttl_secs = 3600
+
+[guardrails]
+max_input_chars = 100000
+max_output_chars = 100000
+blocked_patterns = []
+required_patterns = []
+
+[metering]
+database_url = "postgres://gateway:gateway@localhost:5432/ai_gateway"
+
+[routing]
+default_provider = "openai"
