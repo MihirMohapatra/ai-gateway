@@ -8,6 +8,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::stream::Stream;
 use tokio_stream::wrappers::ReceiverStream;
+use tracing::instrument;
 
 use adapters::anthropic::AnthropicClient;
 use adapters::cache::{CacheBackend, CachingClient};
@@ -23,9 +24,12 @@ use adapters::router::{ProviderMap, ProviderRouter};
 use cache::local::LocalCache;
 use cache::redis::RedisCache;
 
+use crate::metrics::Metrics;
+
 #[derive(Clone)]
 pub struct AppState {
     pub router: Arc<dyn ProviderRouter>,
+    pub metrics: Metrics,
 }
 
 impl AppState {
@@ -41,6 +45,7 @@ impl AppState {
         let openai_url = openai_url.into();
         let anthropic_key = anthropic_key.into();
         let anthropic_url = anthropic_url.into();
+        let metrics = Metrics::new();
 
         let cache_backend: Arc<dyn CacheBackend> = if let Some(url) = redis_url {
             match RedisCache::new(&url) {
@@ -91,6 +96,7 @@ impl AppState {
 
         Arc::new(Self {
             router: Arc::new(router),
+            metrics,
         })
     }
 }
@@ -176,30 +182,64 @@ impl ProviderAdapter for CircuitBreakerAdapter {
     }
 }
 
+async fn handle_metrics(
+    State(state): State<Arc<AppState>>,
+) -> (axum::http::StatusCode, String) {
+    let body = state.metrics.encode();
+    (axum::http::StatusCode::OK, body)
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(handle_root))
+        .route("/metrics", get(handle_metrics))
         .route("/chat", post(handle_chat))
         .route("/chat/stream", post(handle_chat_stream))
         .with_state(state)
 }
 
+#[instrument(skip(state, req), fields(provider, model, latency_ms, token_count))]
 async fn handle_chat(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<Json<GatewayResponse>, (axum::http::StatusCode, Json<serde_json::Value>)> {
     let provider_name = req.provider.as_deref().unwrap_or("openai");
+    let model = req.model.as_str();
+    let span = tracing::Span::current();
+    span.record("provider", provider_name);
+    span.record("model", model);
+
+    state.metrics.requests_in_flight.inc();
     let start = Instant::now();
 
-    match state.router.complete(&req, Some(provider_name)).await {
+    let result = state.router.complete(&req, Some(provider_name)).await;
+    let latency = start.elapsed().as_secs_f64();
+
+    match result {
         Ok(response) => {
-            let latency = start.elapsed().as_millis() as u64;
-            Ok(Json(GatewayResponse::from_provider(response, provider_name, latency, false)))
+            let token_count = response.usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
+            span.record("latency_ms", (latency * 1000.0) as i64);
+            span.record("token_count", token_count as i64);
+
+            state.metrics.observe_request(provider_name, model, "success", latency);
+            if let Some(ref usage) = response.usage {
+                state.metrics.record_tokens(provider_name, usage.prompt_tokens, usage.completion_tokens);
+            }
+            state.metrics.requests_in_flight.dec();
+
+            let latency_ms = (latency * 1000.0) as u64;
+            Ok(Json(GatewayResponse::from_provider(response, provider_name, latency_ms, false)))
         }
-        Err(e) => Err(map_error(e)),
+        Err(e) => {
+            state.metrics.observe_request(provider_name, model, "error", latency);
+            state.metrics.record_error(provider_name, &format!("{:?}", e));
+            state.metrics.requests_in_flight.dec();
+            Err(map_error(e))
+        }
     }
 }
 
+#[instrument(skip(state, req), fields(provider, model))]
 pub async fn handle_chat_stream(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatCompletionRequest>,
@@ -208,8 +248,24 @@ pub async fn handle_chat_stream(
     (axum::http::StatusCode, Json<serde_json::Value>),
 > {
     let provider_name = req.provider.as_deref().unwrap_or("openai");
+    let model = req.model.as_str();
+    let span = tracing::Span::current();
+    span.record("provider", provider_name);
+    span.record("model", model);
 
-    let byte_stream = state.router.stream(&req, Some(provider_name)).await.map_err(map_error)?;
+    state.metrics.requests_in_flight.inc();
+    let start = Instant::now();
+
+    let byte_stream = state.router.stream(&req, Some(provider_name)).await.map_err(|e| {
+        state.metrics.observe_request(provider_name, model, "error", start.elapsed().as_secs_f64());
+        state.metrics.record_error(provider_name, &format!("{:?}", e));
+        state.metrics.requests_in_flight.dec();
+        map_error(e)
+    })?;
+
+    let metrics = state.metrics.clone();
+    let provider = provider_name.to_string();
+    let model = model.to_string();
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
 
@@ -230,6 +286,10 @@ pub async fn handle_chat_stream(
                 Err(_) => break,
             }
         }
+
+        let latency = start.elapsed().as_secs_f64();
+        metrics.observe_request(&provider, &model, "success", latency);
+        metrics.requests_in_flight.dec();
     });
 
     Ok(Sse::new(ReceiverStream::new(rx)))

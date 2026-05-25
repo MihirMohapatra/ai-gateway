@@ -8,6 +8,7 @@ use tower::ServiceBuilder;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
+mod metrics;
 mod routes;
 mod tls;
 
@@ -33,8 +34,16 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let trace_layer = TraceLayer::new_for_http()
-        .make_span_with(DefaultMakeSpan::new().level(Level::INFO).include_headers(false))
-        .on_response(DefaultOnResponse::new().level(Level::INFO).latency_unit(tower_http::LatencyUnit::Micros));
+        .make_span_with(
+            DefaultMakeSpan::new()
+                .level(Level::INFO)
+                .include_headers(false),
+        )
+        .on_response(
+            DefaultOnResponse::new()
+                .level(Level::INFO)
+                .latency_unit(tower_http::LatencyUnit::Micros),
+        );
 
     let app = Router::new()
         .route("/health", get(|| async { "OK" }))

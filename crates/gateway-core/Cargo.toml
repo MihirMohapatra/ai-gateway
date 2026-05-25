@@ -35,6 +35,7 @@ tokio-util.workspace = true
 sha2.workspace = true
 hex.workspace = true
 sqlx.workspace = true
+prometheus.workspace = true
 
 adapters = { path = "../adapters" }
 middleware = { path = "../middleware" }
