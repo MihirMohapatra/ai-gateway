@@ -7,10 +7,13 @@ name = "adapters"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "dashmap 6.2.1",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "tokio",
  "tracing",
 ]
 
@@ -522,6 +525,7 @@ version = "0.1.0"
 dependencies = [
  "adapters",
  "anyhow",
+ "async-trait",
  "axum",
  "bytes",
  "cache",
