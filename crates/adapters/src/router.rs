@@ -1,89 +1,76 @@
 use std::sync::Arc;
 
-use crate::client::ProviderClient;
-use crate::error::ProviderError;
-use crate::request::{ChatCompletionRequest, ChatCompletionResponse};
+use async_trait::async_trait;
 use dashmap::DashMap;
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-pub enum ProviderId {
-    OpenAI,
-    Anthropic,
-}
+use crate::client::{ByteStream, ProviderAdapter};
+use crate::error::ProviderError;
+use crate::request::{ChatCompletionRequest, ChatCompletionResponse};
 
-pub trait ModelRouter: Send + Sync {
-    fn resolve(&self, model: &str) -> Vec<ProviderId>;
-}
-
-pub struct ModelNameRouter;
-
-impl ModelRouter for ModelNameRouter {
-    fn resolve(&self, model: &str) -> Vec<ProviderId> {
-        let lower = model.to_lowercase();
-        if lower.starts_with("gpt") || lower.starts_with("o1") || lower.starts_with("o3") || lower.contains("openai") {
-            vec![ProviderId::OpenAI, ProviderId::Anthropic]
-        } else if lower.starts_with("claude") || lower.contains("anthropic") {
-            vec![ProviderId::Anthropic, ProviderId::OpenAI]
-        } else {
-            vec![ProviderId::OpenAI, ProviderId::Anthropic]
-        }
-    }
-}
-
-pub struct PriorityRouter {
-    providers: Vec<ProviderId>,
-}
-
-impl PriorityRouter {
-    pub fn new(providers: Vec<ProviderId>) -> Self {
-        Self { providers }
-    }
-}
-
-impl ModelRouter for PriorityRouter {
-    fn resolve(&self, _model: &str) -> Vec<ProviderId> {
-        self.providers.clone()
-    }
-}
-
+#[derive(Clone)]
 pub struct ProviderMap {
-    clients: DashMap<ProviderId, Arc<dyn ProviderClient>>,
-    router: Box<dyn ModelRouter>,
+    providers: Arc<DashMap<String, Arc<dyn ProviderAdapter>>>,
+    default_provider: Option<String>,
+    preferred_order: Arc<Vec<String>>,
 }
 
 impl ProviderMap {
-    pub fn new(router: Box<dyn ModelRouter>) -> Self {
+    pub fn new() -> Self {
         Self {
-            clients: DashMap::new(),
-            router,
+            providers: Arc::new(DashMap::new()),
+            default_provider: None,
+            preferred_order: Arc::new(Vec::new()),
         }
     }
 
-    pub fn register(&self, id: ProviderId, client: Arc<dyn ProviderClient>) {
-        self.clients.insert(id, client);
+    pub fn with_default(mut self, provider: &str) -> Self {
+        self.default_provider = Some(provider.to_string());
+        self
     }
 
-    pub fn resolve(&self, model: &str) -> Vec<ProviderId> {
-        self.router.resolve(model)
+    pub fn with_provider(self, name: &str, client: Arc<dyn ProviderAdapter>) -> Self {
+        self.providers.insert(name.to_string(), client);
+        self
     }
 
-    pub fn route(&self, _req: ChatCompletionRequest) -> Result<ChatCompletionResponse, ProviderError> {
+    pub fn add(&self, name: &str, client: Arc<dyn ProviderAdapter>) {
+        self.providers.insert(name.to_string(), client);
+    }
+
+    pub fn set_preferred_order(&mut self, order: Vec<String>) {
+        self.preferred_order = Arc::new(order);
+    }
+}
+
+#[async_trait]
+pub trait ProviderRouter: Send + Sync {
+    async fn complete(&self, req: &ChatCompletionRequest, provider: Option<&str>) -> Result<ChatCompletionResponse, ProviderError>;
+    async fn stream(&self, req: &ChatCompletionRequest, provider: Option<&str>) -> Result<ByteStream, ProviderError>;
+}
+
+#[async_trait]
+impl ProviderRouter for ProviderMap {
+    async fn complete(&self, req: &ChatCompletionRequest, provider: Option<&str>) -> Result<ChatCompletionResponse, ProviderError> {
+        let provider_name = provider
+            .or(self.default_provider.as_deref())
+            .unwrap_or("openai");
+
+        if let Some(client) = self.providers.get(provider_name) {
+            return client.complete(req.clone()).await;
+        }
+
         Err(ProviderError::NoProvider)
     }
 
-    pub async fn chat_completion(&self, req: ChatCompletionRequest) -> Result<ChatCompletionResponse, ProviderError> {
-        let providers = self.router.resolve(&req.model);
-        for provider in &providers {
-            if let Some(client) = self.clients.get(provider) {
-                match client.chat_completion(req.clone()).await {
-                    Ok(resp) => return Ok(resp),
-                    Err(e) => {
-                        tracing::warn!(?provider, error = %e, "provider failed, trying next");
-                        continue;
-                    }
-                }
-            }
+    async fn stream(&self, req: &ChatCompletionRequest, provider: Option<&str>) -> Result<ByteStream, ProviderError> {
+        let provider_name = provider
+            .or(self.default_provider.as_deref())
+            .unwrap_or("openai");
+
+        if let Some(client) = self.providers.get(provider_name) {
+            return client.stream(req.clone()).await;
         }
-        Err(ProviderError::AllProvidersFailed)
+
+        Err(ProviderError::NoProvider)
     }
 }

@@ -1,80 +1,117 @@
 use std::sync::Arc;
+use std::convert::Infallible;
 
-use adapters::client::{CircuitBreakerClient, RetryClient};
+use axum::extract::State;
+use axum::response::sse::{Event, Sse};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use futures::stream::Stream;
+use tokio_stream::wrappers::ReceiverStream;
+
+use adapters::anthropic::AnthropicClient;
+
 use adapters::error::ProviderError;
+use adapters::openai::OpenAIClient;
 use adapters::request::{ChatCompletionRequest, ChatCompletionResponse};
-use adapters::router::{ModelNameRouter, ProviderId, ProviderMap};
-use axum::{Json, Router, extract::State, routing::post};
-use serde_json::Value;
-use std::time::Duration;
+use adapters::router::{ProviderMap, ProviderRouter};
 
 #[derive(Clone)]
 pub struct AppState {
-    pub provider_map: Arc<ProviderMap>,
+    pub router: Arc<dyn ProviderRouter>,
 }
 
 impl AppState {
-    pub fn with_defaults(openai_key: String, openai_url: String, anthropic_key: String, anthropic_url: String) -> Self {
-        let router = Box::new(ModelNameRouter);
-        let map = ProviderMap::new(router);
+    pub fn with_defaults(
+        openai_key: impl Into<String>,
+        openai_url: impl Into<String>,
+        anthropic_key: impl Into<String>,
+        anthropic_url: impl Into<String>,
+    ) -> Arc<Self> {
+        let openai = Arc::new(OpenAIClient::new(openai_key, openai_url));
+        let anthropic = Arc::new(AnthropicClient::new(anthropic_key, anthropic_url));
 
-        let openai = CircuitBreakerClient::new(
-            RetryClient::new(
-                adapters::openai::OpenAIClient::new(openai_key, openai_url),
-                3,
-                Duration::from_millis(200),
-                Duration::from_secs(5),
-            ),
-            5,
-            Duration::from_secs(30),
-            1,
-        );
-        map.register(ProviderId::OpenAI, Arc::new(openai));
+        let router = ProviderMap::new()
+            .with_provider("openai", openai)
+            .with_provider("anthropic", anthropic)
+            .with_default("openai");
 
-        let anthropic = CircuitBreakerClient::new(
-            RetryClient::new(
-                adapters::anthropic::AnthropicClient::new(anthropic_key, anthropic_url),
-                3,
-                Duration::from_millis(200),
-                Duration::from_secs(5),
-            ),
-            5,
-            Duration::from_secs(30),
-            1,
-        );
-        map.register(ProviderId::Anthropic, Arc::new(anthropic));
-
-        Self { provider_map: Arc::new(map) }
+        Arc::new(Self {
+            router: Arc::new(router),
+        })
     }
 }
 
-pub fn router(state: AppState) -> Router {
+pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/v1/chat/completions", post(chat_completions))
-        .route("/v1/embeddings", post(embeddings))
+        .route("/", get(handle_root))
+        .route("/chat", post(handle_chat))
+        .route("/chat/stream", post(handle_chat_stream))
         .with_state(state)
 }
 
-async fn chat_completions(
-    State(state): State<AppState>,
+async fn handle_chat(
+    State(state): State<Arc<AppState>>,
     Json(req): Json<ChatCompletionRequest>,
-) -> Result<Json<ChatCompletionResponse>, (axum::http::StatusCode, Json<Value>)> {
-    tracing::info!(model = %req.model, messages = %req.messages.len(), "chat completion request");
-    match state.provider_map.chat_completion(req).await {
-        Ok(resp) => Ok(Json(resp)),
-        Err(ProviderError::AllProvidersFailed) => {
-            Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "all providers failed"}))))
-        }
-        Err(e) => {
-            Err((axum::http::StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": e.to_string()}))))
-        }
+) -> Result<Json<ChatCompletionResponse>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    let provider = Some(req.model.as_str());
+
+    match state.router.complete(&req, provider).await {
+        Ok(response) => Ok(Json(response)),
+        Err(e) => Err(map_error(e)),
     }
 }
 
-async fn embeddings(
-    State(_state): State<AppState>,
+pub async fn handle_chat_stream(
+    State(state): State<Arc<AppState>>,
     Json(req): Json<ChatCompletionRequest>,
-) -> Json<Value> {
-    tracing::info!(model = %req.model, "embedding request");
-    Json(serde_json::json!({ "status": "received", "model": req.model }))
+) -> Result<
+    Sse<impl Stream<Item = Result<Event, Infallible>>>,
+    (axum::http::StatusCode, Json<serde_json::Value>),
+> {
+    let provider = Some(req.model.as_str());
+
+    let byte_stream = state.router.stream(&req, provider).await.map_err(map_error)?;
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
+
+    tokio::spawn(async move {
+        use futures::StreamExt;
+        let mut byte_stream = byte_stream;
+
+        while let Some(chunk) = byte_stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    if bytes.as_ref() == b"\n" {
+                        let _ = tx.send(Ok(Event::default().data(""))).await;
+                    } else {
+                        let text = String::from_utf8_lossy(&bytes);
+                        let _ = tx.send(Ok(Event::default().data(text))).await;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    Ok(Sse::new(ReceiverStream::new(rx)))
+}
+
+async fn handle_root() -> &'static str {
+    "AI Gateway is running"
+}
+
+fn map_error(e: ProviderError) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    let (status, message) = match &e {
+        ProviderError::RateLimited => (axum::http::StatusCode::TOO_MANY_REQUESTS, "Rate limited"),
+        ProviderError::Timeout => (axum::http::StatusCode::GATEWAY_TIMEOUT, "Request timed out"),
+        ProviderError::CircuitOpen => (axum::http::StatusCode::SERVICE_UNAVAILABLE, "Circuit breaker open"),
+        ProviderError::NoProvider => (axum::http::StatusCode::BAD_REQUEST, "No provider configured"),
+        ProviderError::AllProvidersFailed => (axum::http::StatusCode::BAD_GATEWAY, "All providers failed"),
+        ProviderError::Api { .. } => (axum::http::StatusCode::BAD_GATEWAY, "Provider API error"),
+        _ => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Internal error"),
+    };
+    (
+        status,
+        Json(serde_json::json!({ "error": message })),
+    )
 }
