@@ -2,7 +2,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-blue?logo=rust)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![CI](https://github.com/MihirMohapatra/ai-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/MihirMohapatra/ai-gateway/actions/workflows/rust.yml)
+[![CI](https://github.com/MihirMohapatra/ai-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/MihirMohapatra/ai-gateway/.github/workflows/rust.yml)
 
 A **unified API gateway** for multiple LLM providers (OpenAI, Anthropic, and more) with built-in resilience, caching, observability, and hot-reloadable configuration.
 
