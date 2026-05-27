@@ -26,39 +26,7 @@ A **unified API gateway** for multiple LLM providers (OpenAI, Anthropic, and mor
 ## Architecture
 
 ```
-                     ┌─────────────────────────┐
-                     │   HTTP Request (axum)    │
-                     └──────────┬──────────────┘
-                                │
-                    ┌───────────▼───────────┐
-                    │   Middleware Pipeline  │
-                    │  ┌─────────────────┐  │
-                    │  │  Auth (JWT)     │  │
-                    │  ├─────────────────┤  │
-                    │  │  Rate Limit     │  │
-                    │  ├─────────────────┤  │
-                    │  │  Tracing/Trace  │  │
-                    │  └────────┬────────┘  │
-                    └───────────┼───────────┘
-                                │
-                    ┌───────────▼───────────┐
-                    │   Provider Pipeline   │
-                    │  ┌─────────────────┐  │
-                    │  │  Guardrails     │  │
-                    │  ├─────────────────┤  │
-                    │  │  Caching        │  │
-                    │  ├─────────────────┤  │
-                    │  │  Metering       │  │
-                    │  ├─────────────────┤  │
-                    │  │  Retry          │  │
-                    │  ├─────────────────┤  │
-                    │  │  Circuit Breaker│  │
-                    │  ├─────────────────┤  │
-                    │  │  Provider       │  │
-                    │  │  (OpenAI/Anthropic)││
-                    │  └─────────────────┘  │
-                    └───────────────────────┘
-```
+<img src="docs/architecture.svg" alt="AI Gateway Architecture" width="800">
 
 ### Workspace layout
 
